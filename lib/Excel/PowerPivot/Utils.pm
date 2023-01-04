@@ -76,20 +76,12 @@ sub measures {
   my @measures;
   for my $wb_measure (in $excel_model->ModelMeasures) {
     my %measure = (
-      Name            => $wb_measure->Name,
-      AssociatedTable => $wb_measure->AssociatedTable->Name,
-      Formula         => $wb_measure->Formula,
-      Description     => $wb_measure->Description,
+      Name              => $wb_measure->Name,
+      AssociatedTable   => $wb_measure->AssociatedTable->Name,
+      Formula           => $wb_measure->Formula,
+      Description       => $wb_measure->Description,
+      FormatInformation => flatten_format_information($wb_measure),
      );
-
-    if (my $format_obj  = $wb_measure->FormatInformation) {
-      my $format_class = Win32::OLE->QueryObjectType($format_obj) =~ s/^ModelFormat//r;
-      my @property_values;
-      for my $format_property ($ModelFormat_properties{$format_class}->@*) {
-        push @property_values, $format_obj->{$format_property};
-      }
-      $measure{FormatInformation} = [$format_class, @property_values];
-    }
     push @measures, \%measure;
   }
 
@@ -127,24 +119,13 @@ sub inject_measures {
 
   # check options
   warn "->inject_measures(..) : option '$_' is invalid"
-    foreach invalid_options(\%options, qw/delete_others dont_refresh_pivots/);
-
-  # default options
-  $options{dont_refresh_pivots} //= True;
+    foreach invalid_options(\%options, qw/delete_others/);
 
   # check well-formedness of $measures_to_inject
   does $measures_to_inject, 'ARRAY'
     or die "parameter to inject_measures() is not an arrayref";
   all {has_nonempty_keys(qw/Name AssociatedTable Formula/)->($_)} @$measures_to_inject
     or die "missing mandatory properties in parameter to ->inject_measures()";
-
-  # deactivate refresh in pivot caches
-  my @refreshable_pivots;
-  if ($options{dont_refresh_pivots}) {
-    $self->log->debug("deactivate refresh in pivot caches");
-    @refreshable_pivots = grep {$_->{EnableRefresh}} in $self->workbook->PivotCaches;
-    $_->{EnableRefresh} = 0 foreach @refreshable_pivots;
-  }
 
   # gather measures already existing in the Excel model
   $self->log->info("gathering measures from the existing Excel model");
@@ -163,11 +144,18 @@ sub inject_measures {
              . "if you really want to change to '$measure->{AssociatedTable}', first delete "
              . "the existing measure";
 
-      # update properties of the existing measure
+      # update properties of the existing measure -- Description & Formula are just strings, FormatInformation is more complex
       $self->log->info("updating measure $measure->{Name}");
-      $existing->{FormatInformation} = $self->_build_model_format($measure);
-      $existing->{Description}       = $measure->{Description};
-      $existing->{Formula}           = $measure->{Formula};
+      for my $property (qw/Description Formula/) {
+        my $current = $existing->{$property} // "";
+        my $new_val = $measure->{$property}  // "";
+        $existing->{$property} = $new_val
+          if $new_val ne $current;
+      }
+      my $existing_format = flatten_format_information($existing);
+      my $new_format      = $measure->{FormatInformation} // [];
+      $existing->{FormatInformation} = $self->_build_model_format($measure)
+        if join("\t", @$existing_format) ne join("\t", @$new_format);
     }
 
     # otherwise, create a new measure in the Excel model
@@ -190,10 +178,6 @@ sub inject_measures {
     $self->log->info("deleting measure $_->{Name}"), $_->Delete
       foreach values %existing_measures;
   }
-
-  # reactivate refresh in pivot caches
-  $self->log->debug("reactivate refresh in pivot caches") if @refreshable_pivots;
-  $_->{EnableRefresh} = 1 foreach @refreshable_pivots;
 
   $self->log->info("done injecting measures");
 }
@@ -391,10 +375,10 @@ sub inject_relationships {
   $self->log->info("gathering existing relationships in model");
   my %existing_relationships 
     = map {my $fk_pk = sprintf "%s.%s=>%s.%s",
-                         $_->ForeignKeyTable->Name, $->ForeignKeyColumn->Name,
-                         $_->PrimaryKeyTable->Name, $->PrimaryKeyColumn->Name;
-           ($fk_pk => $_->Active)}
-          in $self->workbook->Model->ModelRelationships;
+                         $_->ForeignKeyTable->Name, $_->ForeignKeyColumn->Name,
+                         $_->PrimaryKeyTable->Name, $_->PrimaryKeyColumn->Name;
+           ($fk_pk => $_)
+          } in $self->workbook->Model->ModelRelationships;
 
   # handle each relationship to inject
   foreach my $rel (@$relationships_to_inject) {
@@ -402,7 +386,7 @@ sub inject_relationships {
 
     # if that relationship is alreay in the model, update its activity status
     if (my $existing = delete $existing_relationships{$fk_pk}) {
-      if ($existing->{Active} xor $rel->{Active}) {
+      if ($existing->Active xor $rel->{Active}) {
         $self->log->info("updating relationship $fk_pk");
         $existing->{Active} = $rel->{Active};
       }
@@ -505,6 +489,20 @@ sub invalid_options {
   return grep {!$is_valid{$_}} keys %$options;
 }
 
+
+sub flatten_format_information {
+  my ($wb_measure) = @_;
+
+  my @format_information; # of shape: ($classname, $property1, ...)
+
+  if (my $format_obj  = $wb_measure->FormatInformation) {
+    my $format_class = Win32::OLE->QueryObjectType($format_obj) =~ s/^ModelFormat//r;
+    push @format_information, $format_class,
+                              map {$format_obj->{$_}} $ModelFormat_properties{$format_class}->@*;
+  }
+
+  return \@format_information
+}
 
 
 1;
@@ -673,6 +671,8 @@ Returns information about relationships in the Excel model.
 Due to the inner constraints of Power Pivot, all relationships are many-to-one.
 The returned structure is a list of hashrefs containing :
 
+=over
+
 =item ForeignKey
 
 A single string of form C<$table.$column>, describing the "many" side of the relationship.
@@ -760,11 +760,6 @@ Options are :
 
 If true, measures not mentioned in the list are deleted from the model. False by default.
 
-=item dont_refresh_pivots
-
-If true, the C<EnableRefresh> property in pivot caches is temporarily disabled, which allows
-for much faster operations on measures in the model. True by default.
-
 =back
 
 
@@ -791,6 +786,12 @@ corresponding subtrees.
 
 Unfortunately this module cannot add DAX computed columns to a model table ... because
 there is no available method for this task in the VBA interface for Excel.
+
+=item *
+
+For the same reason, there is no support either for manipulating hierarchies (i.e groups of columns
+in a dimension table).
+
 
 =item *
 
@@ -830,7 +831,7 @@ download the sqlite database
 =item 2.
 
 generate an Excel file with an Excel table for each database table
-(through the companion module L<Excel::ValueWriter::XLSX).
+(through the companion module L<Excel::ValueWriter::XLSX>).
 
 =item 3.
 
