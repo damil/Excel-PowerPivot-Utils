@@ -1,4 +1,12 @@
 Revision history for Excel-PowerPivot-Utils
 
+
+
+  - refactored treatment of FormatInformation
+  - dropped EnableRefresh -- not relevant because it has to do with user interaction, not computation
+  - fixed bug in inject_relationships
+  - fixed POD bug
+
+
 0.1      04.01.2023
   - initial release

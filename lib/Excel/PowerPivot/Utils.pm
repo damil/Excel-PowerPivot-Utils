@@ -1,12 +1,13 @@
-use 5.20.0;            # because this is the first perl version with hash slices
+use 5.20.0;  # because this is the minimal perl version with hash slices
 package Excel::PowerPivot::Utils;
 use utf8;
 use Moose;
-use Win32::OLE         qw/in/;
-use Scalar::Does       qw/does/;
-use List::Util         qw/all/;
+use Moose::Util::TypeConstraints qw/duck_type/;
+use Win32::OLE                   qw/in CP_UTF8/;
+use Scalar::Does                 qw/does/;
+use List::Util                   qw/all/;
+use POSIX                        qw/strftime/;
 use Log::Dispatch;
-use POSIX              qw/strftime/;
 
 
 #======================================================================
@@ -18,7 +19,7 @@ our $VERSION = '0.1';
 use constant {
   True                 => 1,
   False                => 0,
-  xlCmdTableCollection => 6, # see https://learn.microsoft.com/en-us/office/vba/api/excel.xlcmdtype
+  xlCmdTableCollection => 6,   # see https://learn.microsoft.com/en-us/office/vba/api/excel.xlcmdtype
 };
 
 my %ModelFormat_properties = ( # see https://learn.microsoft.com/en-us/office/vba/api/excel.model
@@ -34,12 +35,14 @@ my %ModelFormat_properties = ( # see https://learn.microsoft.com/en-us/office/vb
 
 my $YAML_separator_line = '#' . '='x70;
 
+
 #======================================================================
-# ATTRIBUTES AND THEIR BUILDERS
+# ATTRIBUTES AND THEIR BUILDERS, CONSTRUCTOR AND DESTRUCTOR
 #======================================================================
 
-has 'workbook' => (is => 'ro', lazy => True, builder => '_default_workbook');
-has 'log'      => (is => 'ro', lazy => True, builder => '_default_logger');
+has 'workbook' => (is => 'ro', isa => 'Win32::OLE',                        lazy => True, builder => '_default_workbook');
+has 'log'      => (is => 'ro', isa => duck_type([qw/debug info warning/]), lazy => True, builder => '_default_logger');
+has 'UTF8'     => (is => 'ro', isa => 'Bool');
 
 
 sub _default_workbook  {
@@ -60,6 +63,25 @@ sub _default_logger {
                      });
 }
 
+sub BUILD {
+  my ($self) = @_;
+
+  if ($self->UTF8) {
+    my $previous_CP = Win32::OLE->Option('CP');
+    if (($previous_CP // -1) != CP_UTF8) {
+      $self->{previous_CP} = $previous_CP;
+      Win32::OLE->Option(CP => CP_UTF8);
+    }
+  }
+}
+
+
+sub DEMOLISH {
+  my ($self) = @_;
+  if (exists $self->{previous_CP}) {
+    Win32::OLE->Option(CP => $self->{previous_CP});
+  }
+}
 
 
 
@@ -213,17 +235,34 @@ sub queries {
 
 
 sub queries_as_YAML {
-  my ($self) = @_;
+  my ($self, $col_name, $col_type) = @_;
+
+  # build code for nice reformatting of type arguments to the TransformColumnTypes() function
+  $col_name //= 8;
+  $col_type //= 40;
+  my $reformat_types = sub {
+    my ($types) = @_;
+    $types =~ s[{]["\n" . (' ' x $col_name) . '{']eg;
+    $types =~ s[("\w+",) ][$1 . (' 'x($col_type-$col_name-length($1)))]eg;
+    return $types;
+  };
 
   my $yaml = "";
 
   foreach my $query ($self->queries) {
+
+    # get the Power Query formula and reformat it if type arguments are on a single-line
+    my $formula = $query->{Formula};
+    $formula =~ s[(TransformColumnTypes.*?{)({.*})}][$1 . $reformat_types->($2) . '}']eg
+      if $col_name;
+
+    # build the YAML entry for that query
     $yaml .= "\n\n$YAML_separator_line\n"
           .  "- Name        : $query->{Name}\n"
           .  "$YAML_separator_line\n"
           .  "  Description : $query->{Description}\n"
           .  "  Formula     : |-\n"
-          .  $query->{Formula} =~ s/^/    /gmr;
+          .  $formula =~ s/^/    /gmr; # indentation of the formula code
   }
 
   return $yaml;
@@ -518,7 +557,7 @@ Excel::PowerPivot::Utils - utilities for scripting Power Pivot models within Exc
 =head1 SYNOPSIS
 
   use Excel::PowerPivot::Utils;
-  my $ppu = Excel::PowerPivot::Utils->new; # will connect to the currently active workbook
+  my $ppu = Excel::PowerPivot::Utils->new(UTF8 => 1);
 
   # operations on the whole model ...
   print $ppu->whole_model_as_YAML;
@@ -590,15 +629,33 @@ Creates a new instance. Options are :
 
 =item workbook
 
-An OLE object representing an Excel workbook. 
-If none is supplied, it will default to the currently active workbook.
+A C<Win32::OLE> object representing an Excel workbook.
+If none is supplied, it will connect to the currently running Excel instance and take
+the active workbook as default.
 
 =item log
 
 A logger object equipped with C<debug>, C<info> and C<warning> methods.
 If none is supplied, a simple logger is automatically created from L<Log::Dispatch>.
 
+=item UTF8
+
+A boolean flag for setting the L<Win32::OLE> codepoint option to UTF8, so that
+strings are properly encoded/decoded between Perl and the OLE server.
+It is highly recommended to I<systematically set this option to true>, since
+this module is mostly used together with L<YAML>, which uses UTF8 encoding.
+
+This option will automatically trigger C<< Win32::OLE->Option(CP => CP_UTF8) >>
+at object construction time, and will set it back to the previous value at object
+destruction time. Beware however that this is a change in global state, so if
+your program performs other operations through L<Win32::OLE> during the lifetime
+of the C<Excel::PowerPivot::Utils> object, string handling might be affected.
+This is the reason why we require this option to be set explicitly instead of
+being enabled automatically by default.
+
 =back
+
+
 
 =head1 METHODS
 
