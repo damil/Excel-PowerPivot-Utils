@@ -14,7 +14,7 @@ use Log::Dispatch;
 # GLOBALS
 #======================================================================
 
-our $VERSION = '0.1';
+our $VERSION = '0.2';
 
 use constant {
   True                 => 1,
@@ -23,13 +23,13 @@ use constant {
 };
 
 my %ModelFormat_properties = ( # see https://learn.microsoft.com/en-us/office/vba/api/excel.model
-  Currency             => [qw/Symbol DecimalPlaces/],
-  Date                 => [qw/FormatString/],
+  Currency             => [qw/Symbol               DecimalPlaces/],
+  Date                 => [qw/FormatString                      /],
   DecimalNumber        => [qw/UseThousandSeparator DecimalPlaces/],
-  General              => [],
+  General              => [                                      ],
   PercentageNumber     => [qw/UseThousandSeparator DecimalPlaces/],
-  ScientificNumber     => [qw/DecimalPlaces/],
-  WholeNumber          => [qw/UseThousandSeparator/],
+  ScientificNumber     => [qw/DecimalPlaces                     /],
+  WholeNumber          => [qw/UseThousandSeparator              /],
  );
 
 
@@ -141,13 +141,25 @@ sub inject_measures {
 
   # check options
   warn "->inject_measures(..) : option '$_' is invalid"
-    foreach invalid_options(\%options, qw/delete_others/);
+    foreach invalid_options(\%options, qw/delete_others dont_refresh_pivots/);
+
+  # default options
+  $options{dont_refresh_pivots} //= True;
 
   # check well-formedness of $measures_to_inject
   does $measures_to_inject, 'ARRAY'
     or die "parameter to inject_measures() is not an arrayref";
   all {has_nonempty_keys(qw/Name AssociatedTable Formula/)->($_)} @$measures_to_inject
     or die "missing mandatory properties in parameter to ->inject_measures()";
+
+  # deactivate refresh in pivot caches
+  my @refreshable_pivots;
+  if ($options{dont_refresh_pivots}) {
+    $self->log->debug("deactivate refresh in pivot caches");
+    @refreshable_pivots = grep {$_->{EnableRefresh}} in $self->workbook->PivotCaches;
+    $_->{EnableRefresh} = 0 foreach @refreshable_pivots;
+  }
+
 
   # gather measures already existing in the Excel model
   $self->log->info("gathering measures from the existing Excel model");
@@ -200,6 +212,10 @@ sub inject_measures {
     $self->log->info("deleting measure $_->{Name}"), $_->Delete
       foreach values %existing_measures;
   }
+
+  # reactivate refresh in pivot caches
+  $self->log->debug("reactivate refresh in pivot caches") if @refreshable_pivots;
+  $_->{EnableRefresh} = 1 foreach @refreshable_pivots;
 
   $self->log->info("done injecting measures");
 }
@@ -720,6 +736,12 @@ L<https://learn.microsoft.com/en-us/office/vba/api/excel.queries.fastcombine>.
 
 =back
 
+
+=head3 delete_connection_for_query
+
+Deletes the OLEDB connection associated with the given query name.
+
+
 =head2 Utilities for relationships
 
 =head3 relationships
@@ -793,7 +815,24 @@ the DAX formula
 
 optional description text
 
-=over
+=item FormatInformation
+
+an arrayref describing the format for displaying that measure. Formats are
+documented in L<https://learn.microsoft.com/en-us/office/vba/api/excel.model>.
+The first member of the array is the name of the ModelFormat object, followed by the values
+of its properties. The properties for each format are listed in the table below :
+
+  ModelFormat          Property 1           Property 2
+  ===========          ==========           ==========
+  Currency             Symbol               DecimalPlaces
+  Date                 FormatString
+  DecimalNumber        UseThousandSeparator DecimalPlaces
+  General
+  PercentageNumber     UseThousandSeparator DecimalPlaces
+  ScientificNumber     DecimalPlaces
+  WholeNumber          UseThousandSeparator
+
+=back
 
 =head3 measures_as_YAML
 
@@ -805,7 +844,10 @@ so that it is easily readable by humans.
   $ppu->inject_measures($measures, %options);
 
 Takes an arrayref or measure specifications. Each specification must be a hashref
-with keys C<Name>, C<AssociatedTable>, C<Formula> and optionally C<Description>.
+with keys C<Name>, C<AssociatedTable>, C<Formula> and optionally C<Description> and C<FormatInformation>.
+Values for those keys are strings, except for C<FormatInformation> which takes an arrayref according to the
+table above.
+
 For names corresponding to measures already in the model, this is an update operation;
 other measures in the list are added to the model.
 
