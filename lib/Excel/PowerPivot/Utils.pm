@@ -708,7 +708,7 @@ so that it is easily readable by humans.
 
   $ppu->inject_queries($queries, %options);
 
-Takes an arrayref or query specifications. Each specification must be a hashref
+Takes an arrayref of query specifications. Each specification must be a hashref
 with keys C<Name>, C<Formula> and optionally C<Description>.
 For names corresponding to queries already in the workbook, this is an update operation;
 other queries in the list are added to the workbook.
